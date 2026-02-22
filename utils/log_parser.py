@@ -252,6 +252,12 @@ class LogStore:
         for e in self.entries:
             self._by_service[e.service].append(e)
 
+        # Pre-computed per-service timestamp lists for O(log n) bisect
+        self._by_service_timestamps: Dict[str, List[datetime]] = {
+            svc: [e.timestamp for e in entries]
+            for svc, entries in self._by_service.items()
+        }
+
         # Deterministic reference time: latest entry's timestamp
         if self.entries:
             self.reference_time: datetime = self.entries[-1].timestamp  # already sorted
@@ -320,18 +326,20 @@ class LogStore:
     ) -> List[LogEntry]:
         """Chain multiple filters.  Uses bisect for time, index for service."""
 
-        # Step 1: Pick the right source list via service index
+        # Step 1: Pick the right source list + matching timestamps via service index
         if service and service in self._by_service:
             result = self._by_service[service]
+            ts_list = self._by_service_timestamps[service]
         elif service:
             result = []  # service not present at all
+            ts_list = []
         else:
             result = self.entries
+            ts_list = self._timestamps
 
-        # Step 2: Bisect for time window (O(log n))
-        if time_window:
+        # Step 2: Bisect for time window (O(log n)) using pre-computed ts_list
+        if time_window and result:
             start = self.get_start_time(time_window)
-            ts_list = [e.timestamp for e in result]
             result = self._bisect_range(result, ts_list, start)
 
         # Step 3: Linear filters (already narrowed by service + time)
@@ -353,23 +361,39 @@ class LogStore:
     ) -> List[LogEntry]:
         """Filter entries to a specific [start, end) time range using bisect."""
 
-        # Step 1: Pick source via service index
+        # Step 1: Pick source + matching timestamps via service index
         if service and service in self._by_service:
             source = self._by_service[service]
+            ts_list = self._by_service_timestamps[service]
         elif service:
             source = []
+            ts_list = []
         else:
             source = self.entries
+            ts_list = self._timestamps
 
-        # Step 2: Bisect for time range (O(log n))
-        ts_list = [e.timestamp for e in source]
-        result = self._bisect_range(source, ts_list, start, end)
+        # Step 2: Bisect for time range (O(log n)) using pre-computed ts_list
+        if source:
+            result = self._bisect_range(source, ts_list, start, end)
+        else:
+            result = []
 
         # Step 3: Optional endpoint filter
         if endpoint:
             result = [e for e in result if e.endpoint == endpoint]
 
         return result
+
+    def get_data_context(self) -> dict:
+        """Return a dict describing data freshness for tool consumers."""
+        staleness_hours = (
+            (datetime.now(timezone.utc) - self.reference_time).total_seconds() / 3600
+        )
+        return {
+            "log_data_ends_at": self.reference_time.isoformat(),
+            "hours_since_last_log": round(staleness_hours, 2),
+            "is_historical": staleness_hours > 2.0,
+        }
 
     @staticmethod
     def exclude_fast_failures(entries: List[LogEntry]) -> List[LogEntry]:

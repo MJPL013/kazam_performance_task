@@ -125,6 +125,7 @@ def detect_slow_requests(
     top_slow = sorted(slow_requests, key=lambda x: x["response_time_ms"], reverse=True)[:10]
 
     return {
+        "data_context": store.get_data_context(),
         "service": service or "all_services",
         "time_window": time_window,
         "threshold_ms": threshold_ms,
@@ -264,6 +265,7 @@ def diagnose_latency_sources(
             })
 
     return {
+        "data_context": store.get_data_context(),
         "service": service or "all_services",
         "endpoint": endpoint or "all_endpoints",
         "current_window": {

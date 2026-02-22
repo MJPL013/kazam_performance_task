@@ -3,13 +3,13 @@ baseline_calculator.py -- Math Helpers & Severity Logic
 ========================================================
 Refactored for Phase 2 critical review:
   - SEVERITY_THRESHOLDS corrected to spec (10x / 5x / 2x)
-  - lru_cache on percentile / median for repeated data sets
+  - No caching on percentile/median (unique float lists → zero hit-rate, memory leak)
 
 Contains:
   - SEVERITY_THRESHOLDS (ratio-based)
   - severity_label()        ratio -> CRITICAL/HIGH/MEDIUM/NORMAL
-  - percentile()            linear-interpolation percentile (cached)
-  - median()                statistics.median wrapper (cached)
+  - percentile()            linear-interpolation percentile
+  - median()                statistics.median wrapper
   - parse_window_to_timedelta()  "1h"/"30m"/"2d" -> timedelta
 """
 
@@ -17,8 +17,7 @@ from __future__ import annotations
 
 import statistics
 from datetime import timedelta
-from functools import lru_cache
-from typing import List, Tuple
+from typing import List
 
 
 # --------------------------------------------------
@@ -43,12 +42,10 @@ def severity_label(current: float, baseline: float) -> str:
     return "NORMAL"
 
 
-@lru_cache(maxsize=128)
-def percentile(data: Tuple[float, ...], pct: float) -> float:
+def percentile(data, pct: float) -> float:
     """Return the p-th percentile (0-100 scale) via linear interpolation.
 
-    NOTE: Accepts a tuple (hashable) for caching. Call sites must convert
-    lists to tuples before calling.
+    Accepts list or tuple of floats.
     """
     if not data:
         return 0.0
@@ -61,11 +58,10 @@ def percentile(data: Tuple[float, ...], pct: float) -> float:
     return sorted_d[f] + (k - f) * (sorted_d[c] - sorted_d[f])
 
 
-@lru_cache(maxsize=128)
-def median(data: Tuple[float, ...]) -> float:
-    """Return the median, or 0.0 for an empty tuple.
+def median(data) -> float:
+    """Return the median, or 0.0 for empty data.
 
-    NOTE: Accepts a tuple (hashable) for caching.
+    Accepts list or tuple of floats.
     """
     return statistics.median(data) if data else 0.0
 

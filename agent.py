@@ -204,7 +204,7 @@ TOOL_SCHEMAS = [
                     },
                     "group_by": {
                         "type": "string",
-                        "enum": ["endpoint", "error_type", "event_type"],
+                        "enum": ["endpoint", "error_type", "event_type", "provider"],
                         "default": "endpoint",
                         "description": "How to group errors. 'endpoint' for per-route, 'error_type' for error messages, 'event_type' for event categories.",
                     },
@@ -319,7 +319,7 @@ class GeminiProvider:
         return self.types.Tool(function_declarations=declarations)
 
     def chat(self, messages: List[Dict], system_prompt: str) -> str:
-        """Run the ReAct loop with Gemini."""
+        """Run the ReAct loop with Gemini.  Returns (text, tool_log)."""
         tool = self._build_tools()
 
         # Build Gemini content list from messages
@@ -337,6 +337,7 @@ class GeminiProvider:
                 ))
 
         tool_call_count = 0
+        tool_log: List[Dict[str, Any]] = []  # Track tool exchanges for history
 
         while tool_call_count < MAX_TOOL_CALLS_PER_TURN:
             response = self.client.models.generate_content(
@@ -361,7 +362,8 @@ class GeminiProvider:
             if not has_function_call:
                 # Final text response
                 text_parts = [p.text for p in parts if p.text]
-                return "\n".join(text_parts) if text_parts else "I could not generate a response."
+                final_text = "\n".join(text_parts) if text_parts else "I could not generate a response."
+                return final_text, tool_log
 
             # Process function calls
             contents.append(candidate.content)
@@ -382,6 +384,8 @@ class GeminiProvider:
 
                     print(f"{Fore.BLUE}  [Tool Result: {len(result)} chars]{Style.RESET_ALL}")
 
+                    tool_log.append({"tool": fc.name, "args": args, "result_length": len(result)})
+
                     function_response_parts.append(
                         self.types.Part.from_function_response(
                             name=fc.name,
@@ -394,7 +398,7 @@ class GeminiProvider:
                 parts=function_response_parts,
             ))
 
-        return "I've reached the maximum number of tool calls for this turn. Please refine your question."
+        return "I've reached the maximum number of tool calls for this turn. Please refine your question.", tool_log
 
 
 class OpenAIProvider:
@@ -411,11 +415,12 @@ class OpenAIProvider:
         self.client = OpenAI(api_key=api_key, base_url=base_url)
         self.model = os.getenv("OPENAI_MODEL", "gpt-4")
 
-    def chat(self, messages: List[Dict], system_prompt: str) -> str:
-        """Run the ReAct loop with OpenAI-compatible API."""
+    def chat(self, messages: List[Dict], system_prompt: str):
+        """Run the ReAct loop with OpenAI-compatible API.  Returns (text, tool_log)."""
         full_messages = [{"role": "system", "content": system_prompt}] + messages
 
         tool_call_count = 0
+        tool_log: List[Dict[str, Any]] = []
 
         while tool_call_count < MAX_TOOL_CALLS_PER_TURN:
             response = self.client.chat.completions.create(
@@ -429,7 +434,7 @@ class OpenAIProvider:
             choice = response.choices[0]
 
             if choice.finish_reason == "stop" or not choice.message.tool_calls:
-                return choice.message.content or "I could not generate a response."
+                return (choice.message.content or "I could not generate a response."), tool_log
 
             # Process tool calls
             assistant_msg = choice.message
@@ -465,13 +470,15 @@ class OpenAIProvider:
                 result = execute_tool(func_name, args)
                 print(f"{Fore.BLUE}  [Tool Result: {len(result)} chars]{Style.RESET_ALL}")
 
+                tool_log.append({"tool": func_name, "args": args, "result_length": len(result)})
+
                 full_messages.append({
                     "role": "tool",
                     "tool_call_id": tc.id,
                     "content": result,
                 })
 
-        return "I've reached the maximum number of tool calls for this turn. Please refine your question."
+        return "I've reached the maximum number of tool calls for this turn. Please refine your question.", tool_log
 
 
 # ==============================================================
@@ -519,6 +526,7 @@ class SREAgent:
         Includes sliding-window history truncation:
           - Keeps system prompt intact (handled by providers)
           - Prunes oldest user/assistant turns if history > MAX_HISTORY_MESSAGES
+          - Ensures trimmed history starts with a user message (no orphaned assistant msgs)
         """
         self.conversation_history.append({
             "role": "user",
@@ -527,23 +535,39 @@ class SREAgent:
 
         # ---- Sliding window: truncate to last N messages ----
         if len(self.conversation_history) > MAX_HISTORY_MESSAGES:
-            self.conversation_history = self.conversation_history[-MAX_HISTORY_MESSAGES:]
+            trimmed = self.conversation_history[-MAX_HISTORY_MESSAGES:]
+            # Ensure the first message is a user message (don't orphan assistant replies)
+            while trimmed and trimmed[0]["role"] != "user":
+                trimmed.pop(0)
+            self.conversation_history = trimmed
 
         print(f"{Fore.MAGENTA}  [Agent is thinking...]{Style.RESET_ALL}")
 
         try:
-            response = self.provider.chat(
+            response, tool_log = self.provider.chat(
                 self.conversation_history,
                 self.system_prompt,
             )
         except Exception as exc:
             response = f"I encountered an error communicating with the LLM: {exc}"
+            tool_log = []
             print(f"{Fore.RED}  [LLM Error: {exc}]{Style.RESET_ALL}")
 
-        self.conversation_history.append({
-            "role": "assistant",
-            "content": response,
-        })
+        # ---- Persist tool exchange summary so the LLM remembers what it ran ----
+        if tool_log:
+            tools_summary = "; ".join(
+                f"{t['tool']}({t['args']}) -> {t['result_length']} chars"
+                for t in tool_log
+            )
+            self.conversation_history.append({
+                "role": "assistant",
+                "content": f"[Tool calls this turn: {tools_summary}]\n\n{response}",
+            })
+        else:
+            self.conversation_history.append({
+                "role": "assistant",
+                "content": response,
+            })
 
         return response
 

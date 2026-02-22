@@ -88,6 +88,7 @@ def check_resource_usage(
             _notification_service_indicators(entries, svc, indicators)
 
     return {
+        "data_context": store.get_data_context(),
         "service": service or "all_services",
         "time_window": time_window,
         "reference_time": store.reference_time.isoformat(),
@@ -148,6 +149,19 @@ def _payment_api_indicators(
         "detail": f"stack_trace pool exhaustion signals: {len(conn_pool_hits)}",
     })
 
+    # --- DB Catastrophic Outliers (db_query_time_ms > 3000ms) ---
+    db_outliers = [
+        e for e in entries
+        if e.db_query_time_ms is not None and e.db_query_time_ms > 3000
+    ]
+    indicators.append({
+        "service": svc,
+        "indicator_name": "DB Outlier Queries (>3s)",
+        "current_value": float(len(db_outliers)),
+        "severity": "CRITICAL" if len(db_outliers) > 10 else "HIGH" if len(db_outliers) > 3 else "NORMAL",
+        "detail": f"Queries exceeding 3000ms: {len(db_outliers)}",
+    })
+
 
 # --------------------------------------------------
 #  Charging Controller specific indicators (ENHANCED)
@@ -197,23 +211,48 @@ def _charging_controller_indicators(
             "detail": ", ".join(f"{sid}: {cnt}" for sid, cnt in top_stations),
         })
 
-    # --- ENHANCED: Session Duration Drift ---
+    # --- Recurring Issues ---
+    recurring_count = sum(
+        1 for e in entries
+        if e.metadata.get("note") == "recurring_issue"
+    )
+    if recurring_count > 0:
+        indicators.append({
+            "service": svc,
+            "indicator_name": "Recurring Issues",
+            "current_value": float(recurring_count),
+            "severity": "HIGH" if recurring_count > 5 else "MEDIUM" if recurring_count > 1 else "NORMAL",
+            "detail": f"Logs flagged as recurring_issue: {recurring_count}",
+        })
+
+    # --- FIXED: Session Duration Drift (join started -> completed) ---
+    started_sessions = [e for e in entries if e.event_type == "charging_session_started"]
     completed_sessions = [e for e in entries if e.event_type == "charging_session_completed"]
+
+    # Build lookup: (station_id, user_id) -> estimated_duration_min from started events
+    estimated_lookup: Dict[tuple, float] = {}
+    for e in started_sessions:
+        key = (e.station_id, e.user_id)
+        est = e.metadata.get("estimated_duration_min")
+        if est is not None:
+            estimated_lookup[key] = float(est)
+
     drift_data: List[Dict[str, Any]] = []
     for e in completed_sessions:
         actual = e.metadata.get("duration_min")
-        estimated = e.metadata.get("estimated_duration_min")
-        if actual is not None and estimated is not None:
-            actual_f = float(actual)
-            estimated_f = float(estimated)
-            if estimated_f > 0:
-                drift_pct = round(((actual_f - estimated_f) / estimated_f) * 100, 1)
-                drift_data.append({
-                    "station_id": e.station_id,
-                    "actual_min": actual_f,
-                    "estimated_min": estimated_f,
-                    "drift_pct": drift_pct,
-                })
+        if actual is None:
+            continue
+        actual_f = float(actual)
+        key = (e.station_id, e.user_id)
+        estimated_f = estimated_lookup.get(key)
+        if estimated_f is not None and estimated_f > 0:
+            drift_pct = round(((actual_f - estimated_f) / estimated_f) * 100, 1)
+            drift_data.append({
+                "station_id": e.station_id,
+                "actual_min": actual_f,
+                "estimated_min": estimated_f,
+                "drift_pct": drift_pct,
+            })
 
     if drift_data:
         avg_drift = round(sum(d["drift_pct"] for d in drift_data) / len(drift_data), 1)
@@ -229,20 +268,20 @@ def _charging_controller_indicators(
             ),
         })
 
-    # --- ENHANCED: Energy Anomalies (completed but 0 energy) ---
-    zero_energy = [
+    # --- FIXED: Energy Anomalies (completed but < 1.0 kWh → failed micro-sessions) ---
+    low_energy = [
         e for e in completed_sessions
         if e.metadata.get("energy_delivered_kwh") is not None
-        and float(e.metadata["energy_delivered_kwh"]) == 0
+        and float(e.metadata["energy_delivered_kwh"]) < 1.0
     ]
-    if zero_energy:
-        affected_stations = list(set(e.station_id for e in zero_energy if e.station_id))[:5]
+    if low_energy:
+        affected_stations = list(set(e.station_id for e in low_energy if e.station_id))[:5]
         indicators.append({
             "service": svc,
-            "indicator_name": "Energy Anomalies (0 kWh delivered)",
-            "current_value": float(len(zero_energy)),
-            "severity": "CRITICAL" if len(zero_energy) > 5 else "HIGH" if len(zero_energy) > 1 else "MEDIUM",
-            "detail": f"Sessions completed with 0 energy: {len(zero_energy)}, stations: {', '.join(affected_stations)}",
+            "indicator_name": "Energy Anomalies (<1 kWh delivered)",
+            "current_value": float(len(low_energy)),
+            "severity": "CRITICAL" if len(low_energy) > 5 else "HIGH" if len(low_energy) > 1 else "MEDIUM",
+            "detail": f"Sessions completed with <1 kWh: {len(low_energy)}, stations: {', '.join(affected_stations)}",
         })
 
 

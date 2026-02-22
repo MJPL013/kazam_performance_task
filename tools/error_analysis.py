@@ -31,17 +31,19 @@ def analyze_error_patterns(
     compute failure rates, and detect WARN-log stress signals.
 
     BUG FIX: failure_rate_pct uses per-group denominator.
-    group_by: 'endpoint' | 'error_type' | 'event_type'
+    group_by: 'endpoint' | 'error_type' | 'event_type' | 'provider'
 
     Returns structured dict with buckets and stress signals.
     """
     pool = store.filter(service=service, time_window=time_window)
     total_count = len(pool)
 
-    # Errors: WARN + ERROR level entries, or entries with status >= 400
+    # Errors: WARN + ERROR level entries, status >= 400, or final_status == "failed"
     error_entries = [
         e for e in pool
-        if e.level in ("WARN", "ERROR") or (e.status_code and e.status_code >= 400)
+        if e.level in ("WARN", "ERROR")
+        or (e.status_code and e.status_code >= 400)
+        or e.metadata.get("final_status") == "failed"
     ]
 
     # Group function
@@ -50,6 +52,8 @@ def analyze_error_patterns(
             return e.error_message or "unknown_error"
         elif group_by == "event_type":
             return e.event_type
+        elif group_by == "provider":
+            return e.metadata.get("provider", "unknown_provider")
         else:
             return e.group_key
 
@@ -122,6 +126,7 @@ def analyze_error_patterns(
     stress_signals.sort(key=lambda x: x["count"], reverse=True)
 
     return {
+        "data_context": store.get_data_context(),
         "service": service or "all_services",
         "time_window": time_window,
         "group_by": group_by,
