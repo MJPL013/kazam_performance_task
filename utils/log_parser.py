@@ -46,17 +46,15 @@ class LogEntry(BaseModel):
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
     # -- UTC enforcement at model level ------------------
-    @field_validator("timestamp", mode="before")
+    # Python 3.13 + Pydantic natively parse ISO 8601 with Z-suffix.
+    # This validator only normalises timezone (naive → UTC, non-UTC → UTC).
+    @field_validator("timestamp", mode="after")
     @classmethod
-    def _ensure_utc(cls, v: Any) -> datetime:
-        """Normalise every timestamp to UTC on construction."""
-        if isinstance(v, str):
-            v = datetime.fromisoformat(v)
-        if isinstance(v, datetime):
-            if v.tzinfo is None:
-                return v.replace(tzinfo=timezone.utc)
-            return v.astimezone(timezone.utc)
-        return v  # let Pydantic raise if wrong type
+    def _ensure_utc(cls, v: datetime) -> datetime:
+        """Normalise every timestamp to UTC after Pydantic parses it."""
+        if v.tzinfo is None:
+            return v.replace(tzinfo=timezone.utc)
+        return v.astimezone(timezone.utc)
 
     # -- Optional root-level fields (payment_api only) --
     endpoint: Optional[str] = None
