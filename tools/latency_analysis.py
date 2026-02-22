@@ -3,14 +3,15 @@ latency_analysis.py -- Slow-Request Detection & Latency Diagnosis
 =================================================================
 Tools: detect_slow_requests, diagnose_latency_sources
 
-Phase 1 logic preserved identically; operates on a shared LogStore.
+REFACTORED: Returns structured dicts (not ASCII strings).
+            Uses tuple() for cached median/percentile calls.
 """
 
 from __future__ import annotations
 
 from collections import defaultdict
 from datetime import timedelta
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from utils.baseline_calculator import (
     median,
@@ -18,13 +19,7 @@ from utils.baseline_calculator import (
     percentile,
     severity_label,
 )
-from utils.log_parser import (
-    EndpointLatencyProfile,
-    LatencyBreakdown,
-    LogEntry,
-    LogStore,
-    SlowRequest,
-)
+from utils.log_parser import LogEntry, LogStore
 
 
 # ==================================================
@@ -36,18 +31,15 @@ def detect_slow_requests(
     service: Optional[str] = None,
     threshold_ms: float = 2000.0,
     time_window: str = "1h",
-) -> str:
+) -> dict:
     """
-    Find requests exceeding `threshold_ms` and produce an SRE report.
+    Find requests exceeding `threshold_ms`.
 
-    Steps:
-        1. Filter by service + time window.
-        2. Exclude entries with no response time.
-        3. Exclude fast failures from baseline calculation.
-        4. Identify slow requests (> threshold).
-        5. Group by endpoint/event and compute Median & P90.
-        6. Assign severity vs overall baseline.
-        7. Detect incident spike windows (3+ slow in 5min per endpoint).
+    Returns a structured dict with:
+      - summary metadata (service, window, threshold, counts)
+      - endpoint/event profiles with P50/P90/severity
+      - spike windows (3+ slow reqs within 5 min)
+      - top 10 slowest requests with latency breakdown
     """
     pool = store.filter(service=service, time_window=time_window)
 
@@ -55,7 +47,7 @@ def detect_slow_requests(
     timed = [e for e in pool if e.effective_response_time_ms is not None]
     # Baseline excludes fast failures
     baseline_pool = store.exclude_fast_failures(timed)
-    baseline_times = [e.effective_response_time_ms for e in baseline_pool]
+    baseline_times = tuple(e.effective_response_time_ms for e in baseline_pool)
     overall_baseline = median(baseline_times) if baseline_times else 0.0
 
     # Identify slow requests (from full timed pool, not just baseline)
@@ -63,44 +55,45 @@ def detect_slow_requests(
         e for e in timed if e.effective_response_time_ms > threshold_ms
     ]
 
-    slow_requests: List[SlowRequest] = []
+    # Build slow request records
+    slow_requests: List[Dict[str, Any]] = []
     for e in slow_entries:
-        slow_requests.append(SlowRequest(
-            timestamp=e.timestamp,
-            service=e.service,
-            endpoint_or_event=e.group_key,
-            response_time_ms=e.effective_response_time_ms,
-            threshold_ms=threshold_ms,
-            db_query_time_ms=e.db_query_time_ms,
-            external_api_time_ms=e.external_api_time_ms,
-            app_logic_time_ms=e.app_logic_time_ms,
-            unaccounted_ms=e.unaccounted_latency_ms,
-            user_id=e.user_id,
-        ))
+        slow_requests.append({
+            "timestamp": e.timestamp.isoformat(),
+            "service": e.service,
+            "endpoint_or_event": e.group_key,
+            "response_time_ms": round(e.effective_response_time_ms, 2),
+            "threshold_ms": threshold_ms,
+            "db_query_time_ms": round(e.db_query_time_ms, 2) if e.db_query_time_ms is not None else None,
+            "external_api_time_ms": round(e.external_api_time_ms, 2) if e.external_api_time_ms is not None else None,
+            "app_logic_time_ms": round(e.app_logic_time_ms, 2) if e.app_logic_time_ms is not None else None,
+            "unaccounted_ms": round(e.unaccounted_latency_ms, 2) if e.unaccounted_latency_ms is not None else None,
+            "user_id": e.user_id,
+        })
 
-    # Group by endpoint/event
+    # Group by endpoint/event for profiles
     groups: Dict[str, List[LogEntry]] = defaultdict(list)
     for e in baseline_pool:
         groups[e.group_key].append(e)
 
-    profiles: List[EndpointLatencyProfile] = []
+    profiles: List[Dict[str, Any]] = []
     for key, group_entries in sorted(groups.items()):
-        rts = [e.effective_response_time_ms for e in group_entries]
+        rts = tuple(e.effective_response_time_ms for e in group_entries)
         slow_in_group = sum(1 for r in rts if r > threshold_ms)
         med = median(rts)
-        profiles.append(EndpointLatencyProfile(
-            group_key=key,
-            request_count=len(rts),
-            median_ms=round(med, 2),
-            p90_ms=round(percentile(rts, 90), 2),
-            max_ms=round(max(rts), 2),
-            slow_count=slow_in_group,
-            baseline_median_ms=round(overall_baseline, 2),
-            severity=severity_label(med, overall_baseline),
-        ))
+        profiles.append({
+            "group_key": key,
+            "request_count": len(rts),
+            "median_ms": round(med, 2),
+            "p90_ms": round(percentile(rts, 90), 2),
+            "max_ms": round(max(rts), 2),
+            "slow_count": slow_in_group,
+            "baseline_median_ms": round(overall_baseline, 2),
+            "severity": severity_label(med, overall_baseline),
+        })
 
-    # ---- SRE ADDITION: Spike Window Detection ----
-    spike_windows: List[str] = []
+    # ---- Spike Window Detection ----
+    spike_windows: List[Dict[str, Any]] = []
     slow_by_endpoint: Dict[str, List[LogEntry]] = defaultdict(list)
     for e in slow_entries:
         slow_by_endpoint[e.group_key].append(e)
@@ -117,62 +110,33 @@ def detect_slow_requests(
                 j += 1
             if len(cluster) >= 3:
                 peak_ms = max(e.effective_response_time_ms for e in cluster)
-                spike_windows.append(
-                    f"  Incident Window: {cluster[0].timestamp.isoformat()} to "
-                    f"{cluster[-1].timestamp.isoformat()} - "
-                    f"{len(cluster)} requests on {ep} peaking at {peak_ms:.0f}ms"
-                )
+                spike_windows.append({
+                    "start": cluster[0].timestamp.isoformat(),
+                    "end": cluster[-1].timestamp.isoformat(),
+                    "endpoint": ep,
+                    "count": len(cluster),
+                    "peak_ms": round(peak_ms, 2),
+                })
                 i = j
             else:
                 i += 1
 
-    # ---- Format SRE report ----
-    svc_label = service or "all services"
-    lines = [
-        f"=== SLOW REQUEST REPORT ===",
-        f"Service: {svc_label} | Window: {time_window} | Threshold: {threshold_ms}ms",
-        f"Reference Time: {store.reference_time.isoformat()}",
-        f"Total timed requests: {len(timed)} | Baseline (excl. fast failures): {len(baseline_pool)}",
-        f"Overall baseline median: {overall_baseline:.1f}ms",
-        f"Slow requests found: {len(slow_requests)}",
-        "",
-    ]
+    # Sort slow requests by response time descending, take top 10
+    top_slow = sorted(slow_requests, key=lambda x: x["response_time_ms"], reverse=True)[:10]
 
-    if profiles:
-        lines.append("-- Endpoint / Event Profiles --")
-        for p in sorted(profiles, key=lambda x: x.median_ms, reverse=True):
-            lines.append(
-                f"  [{p.severity:8s}] {p.group_key:<45s} "
-                f"Median: {p.median_ms:>8.1f}ms  P90: {p.p90_ms:>8.1f}ms  "
-                f"Max: {p.max_ms:>8.1f}ms  Count: {p.request_count}  "
-                f"Slow: {p.slow_count}"
-            )
-        lines.append("")
-
-    if spike_windows:
-        lines.append("-- Spike Windows Detected (3+ slow requests within 5 min) --")
-        lines.extend(spike_windows)
-        lines.append("")
-
-    if slow_requests:
-        lines.append("-- Top 10 Slowest Requests --")
-        for sr in sorted(slow_requests, key=lambda x: x.response_time_ms, reverse=True)[:10]:
-            breakdown = ""
-            if sr.db_query_time_ms is not None:
-                breakdown = (
-                    f"  DB: {sr.db_query_time_ms:.0f}ms | "
-                    f"Ext: {sr.external_api_time_ms:.0f}ms | "
-                    f"App: {sr.app_logic_time_ms:.0f}ms | "
-                    f"Unaccounted: {sr.unaccounted_ms:.0f}ms"
-                )
-            lines.append(
-                f"  {sr.timestamp.isoformat()} | {sr.endpoint_or_event:<40s} "
-                f"| {sr.response_time_ms:.0f}ms{breakdown}"
-            )
-    else:
-        lines.append("No requests exceeded the threshold.")
-
-    return "\n".join(lines)
+    return {
+        "service": service or "all_services",
+        "time_window": time_window,
+        "threshold_ms": threshold_ms,
+        "reference_time": store.reference_time.isoformat(),
+        "total_timed_requests": len(timed),
+        "baseline_pool_size": len(baseline_pool),
+        "baseline_median_ms": round(overall_baseline, 2),
+        "slow_request_count": len(slow_requests),
+        "profiles": profiles,
+        "spike_windows": spike_windows,
+        "top_slow_requests": top_slow,
+    }
 
 
 # ==================================================
@@ -185,7 +149,7 @@ def diagnose_latency_sources(
     endpoint: Optional[str] = None,
     time_window: str = "1h",
     baseline_window: str = "24h",
-) -> str:
+) -> dict:
     """
     Break down latency into DB / External / App / Unaccounted
     for each endpoint group.  Compare to historical baseline.
@@ -193,6 +157,8 @@ def diagnose_latency_sources(
     Disjoint baselines:
         current  = [ref - current_td, ref)
         baseline = [ref - baseline_td, ref - current_td)   (NO overlap)
+
+    Returns structured dict with profiles and component breakdowns.
     """
     current_td = parse_window_to_timedelta(time_window)
     baseline_td = parse_window_to_timedelta(baseline_window)
@@ -224,8 +190,8 @@ def diagnose_latency_sources(
     current_groups = _group(current)
     baseline_groups = _group(baseline_all)
 
-    breakdowns: List[LatencyBreakdown] = []
-    profiles: List[EndpointLatencyProfile] = []
+    profiles: List[Dict[str, Any]] = []
+    breakdowns: List[Dict[str, Any]] = []
 
     for key in sorted(set(list(current_groups.keys()) + list(baseline_groups.keys()))):
         c_entries = current_groups.get(key, [])
@@ -234,34 +200,39 @@ def diagnose_latency_sources(
         if not c_entries:
             continue
 
-        c_rts = [e.effective_response_time_ms for e in c_entries]
-        b_rts = [e.effective_response_time_ms for e in b_entries] if b_entries else c_rts
+        c_rts = tuple(e.effective_response_time_ms for e in c_entries)
+        b_rts = tuple(e.effective_response_time_ms for e in b_entries) if b_entries else c_rts
 
         c_median = median(c_rts)
         b_median = median(b_rts)
         sev = severity_label(c_median, b_median)
 
-        profiles.append(EndpointLatencyProfile(
-            group_key=key,
-            request_count=len(c_rts),
-            median_ms=round(c_median, 2),
-            p90_ms=round(percentile(c_rts, 90), 2),
-            max_ms=round(max(c_rts), 2),
-            slow_count=0,
-            baseline_median_ms=round(b_median, 2),
-            severity=sev,
-        ))
+        # Delta percentage
+        delta_pct = None
+        if b_median and b_median > 0:
+            delta_pct = round(((c_median - b_median) / b_median) * 100, 1)
+
+        profiles.append({
+            "group_key": key,
+            "request_count": len(c_rts),
+            "current_median_ms": round(c_median, 2),
+            "current_p90_ms": round(percentile(c_rts, 90), 2),
+            "current_max_ms": round(max(c_rts), 2),
+            "baseline_median_ms": round(b_median, 2),
+            "delta_pct": delta_pct,
+            "severity": sev,
+        })
 
         # Latency breakdown
         entries_with_breakdown = [
             e for e in c_entries if e.db_query_time_ms is not None
         ]
         if entries_with_breakdown:
-            db_vals = [e.db_query_time_ms for e in entries_with_breakdown]
-            ext_vals = [e.external_api_time_ms or 0 for e in entries_with_breakdown]
-            app_vals = [e.app_logic_time_ms or 0 for e in entries_with_breakdown]
-            unacc_vals = [e.unaccounted_latency_ms or 0 for e in entries_with_breakdown]
-            total_vals = [e.effective_response_time_ms for e in entries_with_breakdown]
+            db_vals = tuple(e.db_query_time_ms for e in entries_with_breakdown)
+            ext_vals = tuple(e.external_api_time_ms or 0 for e in entries_with_breakdown)
+            app_vals = tuple(e.app_logic_time_ms or 0 for e in entries_with_breakdown)
+            unacc_vals = tuple(e.unaccounted_latency_ms or 0 for e in entries_with_breakdown)
+            total_vals = tuple(e.effective_response_time_ms for e in entries_with_breakdown)
 
             db_med = median(db_vals)
             ext_med = median(ext_vals)
@@ -281,62 +252,33 @@ def diagnose_latency_sources(
                 if total_med > 0 else 0.0
             )
 
-            breakdowns.append(LatencyBreakdown(
-                group_key=key,
-                total_median_ms=round(total_med, 2),
-                db_median_ms=round(db_med, 2),
-                external_median_ms=round(ext_med, 2),
-                app_logic_median_ms=round(app_med, 2),
-                unaccounted_median_ms=round(unacc_med, 2),
-                primary_bottleneck=bottleneck,
-                bottleneck_pct=bottleneck_pct,
-            ))
+            breakdowns.append({
+                "group_key": key,
+                "total_median_ms": round(total_med, 2),
+                "db_median_ms": round(db_med, 2),
+                "external_median_ms": round(ext_med, 2),
+                "app_logic_median_ms": round(app_med, 2),
+                "unaccounted_median_ms": round(unacc_med, 2),
+                "primary_bottleneck": bottleneck,
+                "bottleneck_pct": bottleneck_pct,
+            })
 
-    # ---- Format SRE report ----
-    svc_label = service or "all services"
-    ep_label = endpoint or "all endpoints"
-    lines = [
-        f"=== LATENCY SOURCE DIAGNOSIS ===",
-        f"Service: {svc_label} | Endpoint: {ep_label}",
-        f"Current Window: {time_window} [{current_start.isoformat()} to {current_end.isoformat()}]",
-        f"Baseline Window: {baseline_window} [{baseline_start.isoformat()} to {baseline_end.isoformat()}] (disjoint)",
-        f"Reference Time: {store.reference_time.isoformat()}",
-        f"Entries analyzed (current): {len(current)} | Baseline: {len(baseline_all)}",
-        "",
-    ]
-
-    if profiles:
-        lines.append("-- Latency vs Baseline --")
-        for p in sorted(profiles, key=lambda x: x.median_ms, reverse=True):
-            delta = ""
-            if p.baseline_median_ms and p.baseline_median_ms > 0:
-                change = ((p.median_ms - p.baseline_median_ms) / p.baseline_median_ms) * 100
-                delta = f"  Delta: {change:+.1f}%"
-            lines.append(
-                f"  [{p.severity:8s}] {p.group_key:<40s}  "
-                f"Current P50: {p.median_ms:>8.1f}ms  P90: {p.p90_ms:>8.1f}ms  "
-                f"Baseline P50: {p.baseline_median_ms:>8.1f}ms{delta}"
-            )
-        lines.append("")
-
-    if breakdowns:
-        lines.append("-- Component Breakdown (Medians) --")
-        for bd in sorted(breakdowns, key=lambda x: x.total_median_ms, reverse=True):
-            lines.append(f"  {bd.group_key}:")
-            lines.append(
-                f"    Total: {bd.total_median_ms:.1f}ms -> "
-                f"DB: {bd.db_median_ms:.1f}ms | "
-                f"External: {bd.external_median_ms:.1f}ms | "
-                f"App: {bd.app_logic_median_ms:.1f}ms | "
-                f"Network/Queue: {bd.unaccounted_median_ms:.1f}ms"
-            )
-            lines.append(
-                f"    Primary Bottleneck: {bd.primary_bottleneck} "
-                f"({bd.bottleneck_pct:.1f}% of total)"
-            )
-        lines.append("")
-
-    if not profiles and not breakdowns:
-        lines.append("No latency data available for the specified filters.")
-
-    return "\n".join(lines)
+    return {
+        "service": service or "all_services",
+        "endpoint": endpoint or "all_endpoints",
+        "current_window": {
+            "label": time_window,
+            "start": current_start.isoformat(),
+            "end": current_end.isoformat(),
+            "entries_analyzed": len(current),
+        },
+        "baseline_window": {
+            "label": baseline_window,
+            "start": baseline_start.isoformat(),
+            "end": baseline_end.isoformat(),
+            "entries_analyzed": len(baseline_all),
+        },
+        "reference_time": store.reference_time.isoformat(),
+        "profiles": profiles,
+        "breakdowns": breakdowns,
+    }

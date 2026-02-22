@@ -1,13 +1,15 @@
 """
 baseline_calculator.py -- Math Helpers & Severity Logic
 ========================================================
-Extracted from Phase 1 PerformanceAnalyzer.
+Refactored for Phase 2 critical review:
+  - SEVERITY_THRESHOLDS corrected to spec (10x / 5x / 2x)
+  - lru_cache on percentile / median for repeated data sets
 
 Contains:
   - SEVERITY_THRESHOLDS (ratio-based)
-  - _severity_label()        ratio -> CRITICAL/HIGH/MEDIUM/NORMAL
-  - _percentile()            linear-interpolation percentile
-  - _median()                statistics.median wrapper
+  - severity_label()        ratio -> CRITICAL/HIGH/MEDIUM/NORMAL
+  - percentile()            linear-interpolation percentile (cached)
+  - median()                statistics.median wrapper (cached)
   - parse_window_to_timedelta()  "1h"/"30m"/"2d" -> timedelta
 """
 
@@ -15,16 +17,18 @@ from __future__ import annotations
 
 import statistics
 from datetime import timedelta
-from typing import List
+from functools import lru_cache
+from typing import List, Tuple
 
 
 # --------------------------------------------------
 #  Severity thresholds (multiplier over baseline)
+#  CORRECTED to spec: CRITICAL >= 10x, HIGH >= 5x, MEDIUM >= 2x
 # --------------------------------------------------
 SEVERITY_THRESHOLDS = {
-    "CRITICAL": 3.0,   # >= 3x baseline
-    "HIGH":     2.0,   # >= 2x baseline
-    "MEDIUM":   1.5,   # >= 1.5x baseline
+    "CRITICAL": 10.0,  # >= 10x baseline
+    "HIGH":     5.0,   # >= 5x baseline
+    "MEDIUM":   2.0,   # >= 2x baseline
 }
 
 
@@ -39,8 +43,13 @@ def severity_label(current: float, baseline: float) -> str:
     return "NORMAL"
 
 
-def percentile(data: List[float], pct: float) -> float:
-    """Return the p-th percentile (0-100 scale) via linear interpolation."""
+@lru_cache(maxsize=128)
+def percentile(data: Tuple[float, ...], pct: float) -> float:
+    """Return the p-th percentile (0-100 scale) via linear interpolation.
+
+    NOTE: Accepts a tuple (hashable) for caching. Call sites must convert
+    lists to tuples before calling.
+    """
     if not data:
         return 0.0
     sorted_d = sorted(data)
@@ -52,8 +61,12 @@ def percentile(data: List[float], pct: float) -> float:
     return sorted_d[f] + (k - f) * (sorted_d[c] - sorted_d[f])
 
 
-def median(data: List[float]) -> float:
-    """Return the median, or 0.0 for an empty list."""
+@lru_cache(maxsize=128)
+def median(data: Tuple[float, ...]) -> float:
+    """Return the median, or 0.0 for an empty tuple.
+
+    NOTE: Accepts a tuple (hashable) for caching.
+    """
     return statistics.median(data) if data else 0.0
 
 

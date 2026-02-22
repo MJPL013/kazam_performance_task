@@ -1,16 +1,21 @@
 """
 log_parser.py -- Pydantic Models & Log Loading
 ===============================================
-Extracted from Phase 1 models.py + PerformanceAnalyzer's loading logic.
+Refactored for Phase 2 critical review:
+  - UTC enforcement on all timestamps
+  - Sorted entries by timestamp for O(log n) bisect filtering
+  - Service index for O(1) service lookup
+  - bisect-based time-window slicing
 
 Contains:
   - LogEntry            (universal model, extra="allow")
   - 6 Result Models     (SlowRequest, EndpointLatencyProfile, ...)
-  - LogStore            (file loader + filter helpers)
+  - LogStore            (file loader + bisect-optimised filter helpers)
 """
 
 from __future__ import annotations
 
+import bisect
 import json
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -211,13 +216,18 @@ class WarnStressSignal(BaseModel):
 
 
 # ======================================================
-#  LogStore -- File Loading + Filtering
+#  LogStore -- File Loading + Bisect-Optimised Filtering
 # ======================================================
 
 class LogStore:
     """
     Loads and stores all log entries.  Provides filtering helpers
     consumed by the tool modules.
+
+    Architecture (post-refactor):
+      - entries sorted by timestamp for O(log n) bisect slicing
+      - _by_service index for O(1) service lookup
+      - _timestamps parallel list for bisect key lookups
 
     Parameters
     ----------
@@ -231,9 +241,20 @@ class LogStore:
         self.parse_errors: List[Dict[str, Any]] = []
         self._load_all_logs()
 
+        # --- O(log n) optimisation: sort + index ---
+        self.entries.sort(key=lambda e: e.timestamp)
+
+        # Parallel timestamp list for bisect lookups
+        self._timestamps: List[datetime] = [e.timestamp for e in self.entries]
+
+        # Service index: each sub-list is also sorted (parent is sorted)
+        self._by_service: Dict[str, List[LogEntry]] = defaultdict(list)
+        for e in self.entries:
+            self._by_service[e.service].append(e)
+
         # Deterministic reference time: latest entry's timestamp
         if self.entries:
-            self.reference_time: datetime = max(e.timestamp for e in self.entries)
+            self.reference_time: datetime = self.entries[-1].timestamp  # already sorted
         else:
             self.reference_time = datetime.now(timezone.utc)
 
@@ -248,6 +269,14 @@ class LogStore:
                     try:
                         data = json.loads(raw_line)
                         entry = LogEntry(**data)
+
+                        # --- UTC enforcement ---
+                        # If timestamp is naive, assume UTC; otherwise convert.
+                        if entry.timestamp.tzinfo is None:
+                            entry.timestamp = entry.timestamp.replace(tzinfo=timezone.utc)
+                        else:
+                            entry.timestamp = entry.timestamp.astimezone(timezone.utc)
+
                         self.entries.append(entry)
                     except Exception as exc:
                         self.parse_errors.append({
@@ -262,7 +291,24 @@ class LogStore:
         """Convert window string to a start datetime relative to reference_time."""
         return self.reference_time - parse_window_to_timedelta(window)
 
-    # -- Filtering helpers ------------------------------
+    # -- Bisect helpers (O(log n) time slicing) ---------
+
+    def _bisect_range(
+        self,
+        entries: List[LogEntry],
+        timestamps: List[datetime],
+        start: datetime,
+        end: Optional[datetime] = None,
+    ) -> List[LogEntry]:
+        """Slice a sorted entry list by [start, end) using bisect."""
+        lo = bisect.bisect_left(timestamps, start)
+        if end is not None:
+            hi = bisect.bisect_left(timestamps, end)
+        else:
+            hi = len(entries)
+        return entries[lo:hi]
+
+    # -- Filtering helpers (refactored with bisect) -----
 
     def filter(
         self,
@@ -272,14 +318,23 @@ class LogStore:
         event_type: Optional[str] = None,
         endpoint: Optional[str] = None,
     ) -> List[LogEntry]:
-        """Chain multiple filters.  All parameters are optional."""
-        result = self.entries
+        """Chain multiple filters.  Uses bisect for time, index for service."""
 
-        if service:
-            result = [e for e in result if e.service == service]
+        # Step 1: Pick the right source list via service index
+        if service and service in self._by_service:
+            result = self._by_service[service]
+        elif service:
+            result = []  # service not present at all
+        else:
+            result = self.entries
+
+        # Step 2: Bisect for time window (O(log n))
         if time_window:
             start = self.get_start_time(time_window)
-            result = [e for e in result if e.timestamp >= start]
+            ts_list = [e.timestamp for e in result]
+            result = self._bisect_range(result, ts_list, start)
+
+        # Step 3: Linear filters (already narrowed by service + time)
         if level:
             result = [e for e in result if e.level == level.upper()]
         if event_type:
@@ -296,13 +351,24 @@ class LogStore:
         service: Optional[str] = None,
         endpoint: Optional[str] = None,
     ) -> List[LogEntry]:
-        """Filter entries to a specific [start, end) time range."""
-        result = self.entries
-        if service:
-            result = [e for e in result if e.service == service]
+        """Filter entries to a specific [start, end) time range using bisect."""
+
+        # Step 1: Pick source via service index
+        if service and service in self._by_service:
+            source = self._by_service[service]
+        elif service:
+            source = []
+        else:
+            source = self.entries
+
+        # Step 2: Bisect for time range (O(log n))
+        ts_list = [e.timestamp for e in source]
+        result = self._bisect_range(source, ts_list, start, end)
+
+        # Step 3: Optional endpoint filter
         if endpoint:
             result = [e for e in result if e.endpoint == endpoint]
-        result = [e for e in result if start <= e.timestamp < end]
+
         return result
 
     @staticmethod

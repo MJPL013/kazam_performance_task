@@ -5,6 +5,12 @@ ReAct loop with function calling, supporting:
   - Google Gemini  (native SDK)
   - OpenAI-compatible APIs  (DeepSeek, ZLM, local models)
 
+REFACTORED:
+  - MAX_TOOL_CALLS_PER_TURN = 10
+  - execute_tool: JSON error dicts (no traceback), dict→JSON serialization
+  - chat(): sliding window history truncation (last 10 messages)
+  - Smoke test updated for dict assertions
+
 Usage:
     python agent.py              # Interactive CLI
     python agent.py --smoke      # Run smoke test on tools
@@ -80,7 +86,7 @@ def tool_detect_slow_requests(
     service: Optional[str] = None,
     threshold_ms: float = 2000.0,
     time_window: str = "1h",
-) -> str:
+) -> dict:
     return detect_slow_requests(get_store(), service=service, threshold_ms=threshold_ms, time_window=time_window)
 
 
@@ -89,7 +95,7 @@ def tool_diagnose_latency_sources(
     endpoint: Optional[str] = None,
     time_window: str = "1h",
     baseline_window: str = "24h",
-) -> str:
+) -> dict:
     return diagnose_latency_sources(get_store(), service=service, endpoint=endpoint, time_window=time_window, baseline_window=baseline_window)
 
 
@@ -97,14 +103,14 @@ def tool_analyze_error_patterns(
     service: Optional[str] = None,
     time_window: str = "1h",
     group_by: str = "endpoint",
-) -> str:
+) -> dict:
     return analyze_error_patterns(get_store(), service=service, time_window=time_window, group_by=group_by)
 
 
 def tool_check_resource_usage(
     service: Optional[str] = None,
     time_window: str = "1h",
-) -> str:
+) -> dict:
     return check_resource_usage(get_store(), service=service, time_window=time_window)
 
 
@@ -122,7 +128,7 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "detect_slow_requests",
-            "description": "Find requests exceeding a latency threshold and identify incident spike windows. Returns an SRE-formatted report with endpoint profiles, P50/P90 stats, and Top 10 slowest requests.",
+            "description": "Find requests exceeding a latency threshold and identify incident spike windows. Returns a JSON object with endpoint profiles, P50/P90 stats, spike windows, and Top 10 slowest requests.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -150,7 +156,7 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "diagnose_latency_sources",
-            "description": "Break down latency into DB, External API, App Logic, and Network/Queue components. Compares current window against a disjoint historical baseline to detect regressions. Identifies the primary bottleneck.",
+            "description": "Break down latency into DB, External API, App Logic, and Network/Queue components. Compares current window against a disjoint historical baseline to detect regressions. Returns JSON with profiles and component breakdowns.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -182,7 +188,7 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "analyze_error_patterns",
-            "description": "Analyze error distribution: differentiates 4xx vs 5xx, computes per-group failure rates, tracks retry patterns, and detects WARN-level pre-error stress signals.",
+            "description": "Analyze error distribution: differentiates 4xx vs 5xx, computes per-group failure rates, tracks retry patterns, and detects WARN-level pre-error stress signals. Returns JSON with error buckets and stress signals.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -211,7 +217,7 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "check_resource_usage",
-            "description": "Monitor service health: error rates (strict ERROR/5xx), warn/throttle rates, DB connection pool exhaustion, queue depth with backlog burn rate, hardware errors, session completion rate, retry exhaustion, delivery failures, and missing DB index detection.",
+            "description": "Monitor service health: error rates (strict ERROR/5xx), warn/throttle rates, DB connection pool exhaustion, queue depth with backlog burn rate, hardware errors, session completion rate, retry exhaustion, delivery failures, and missing DB index detection. Returns JSON with per-service health indicators.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -233,25 +239,41 @@ TOOL_SCHEMAS = [
 ]
 
 
+# ==============================================================
+#  Tool Execution (JSON-safe, no tracebacks to LLM)
+# ==============================================================
+
+MAX_TOOL_CALLS_PER_TURN = 10
+MAX_HISTORY_MESSAGES = 10
+
+
 def execute_tool(name: str, arguments: Dict[str, Any]) -> str:
-    """Execute a tool by name with the given arguments."""
+    """Execute a tool by name.  Always returns a JSON string."""
     func = TOOL_FUNCTIONS.get(name)
     if not func:
-        return f"Error: Unknown tool '{name}'. Available: {list(TOOL_FUNCTIONS.keys())}"
+        return json.dumps({
+            "error": f"Unknown tool '{name}'",
+            "available_tools": list(TOOL_FUNCTIONS.keys()),
+        })
     try:
         # Filter out None values so defaults are used
         clean_args = {k: v for k, v in arguments.items() if v is not None}
-        return func(**clean_args)
+        result = func(**clean_args)
+        # Dict -> JSON string for LLM context
+        if isinstance(result, dict):
+            return json.dumps(result, default=str)
+        return str(result)
     except Exception as exc:
-        return f"Error executing {name}: {exc}\n{traceback.format_exc()}"
+        return json.dumps({
+            "error": "Tool execution failed",
+            "tool": name,
+            "details": str(exc),
+        })
 
 
 # ==============================================================
 #  LLM Providers
 # ==============================================================
-
-MAX_TOOL_CALLS_PER_TURN = 4
-
 
 class GeminiProvider:
     """Google Gemini via google-genai SDK."""
@@ -353,14 +375,11 @@ class GeminiProvider:
                     args = dict(fc.args) if fc.args else {}
                     print(
                         f"{Fore.YELLOW}  [Executing Tool: {fc.name}("
-                        f"{', '.join(f'{k}={v!r}' for k, v in args.items())})]"
-                        f"{Style.RESET_ALL}"
+                        f"{', '.join(f'{k}={v!r}' for k, v in args.items())})]{Style.RESET_ALL}"
                     )
 
                     result = execute_tool(fc.name, args)
 
-                    # Truncate very long results for display
-                    display_result = result[:500] + "..." if len(result) > 500 else result
                     print(f"{Fore.BLUE}  [Tool Result: {len(result)} chars]{Style.RESET_ALL}")
 
                     function_response_parts.append(
@@ -440,8 +459,7 @@ class OpenAIProvider:
 
                 print(
                     f"{Fore.YELLOW}  [Executing Tool: {func_name}("
-                    f"{', '.join(f'{k}={v!r}' for k, v in args.items())})]"
-                    f"{Style.RESET_ALL}"
+                    f"{', '.join(f'{k}={v!r}' for k, v in args.items())})]{Style.RESET_ALL}"
                 )
 
                 result = execute_tool(func_name, args)
@@ -461,7 +479,7 @@ class OpenAIProvider:
 # ==============================================================
 
 class SREAgent:
-    """Multi-model SRE agent with ReAct loop."""
+    """Multi-model SRE agent with ReAct loop and history management."""
 
     def __init__(self):
         load_dotenv(BASE_DIR / ".env")
@@ -498,15 +516,18 @@ class SREAgent:
         """
         Process a user message through the ReAct loop.
 
-        1. Add user message to conversation history
-        2. Call the LLM provider (which handles tool calling internally)
-        3. Add assistant response to history
-        4. Return the final response
+        Includes sliding-window history truncation:
+          - Keeps system prompt intact (handled by providers)
+          - Prunes oldest user/assistant turns if history > MAX_HISTORY_MESSAGES
         """
         self.conversation_history.append({
             "role": "user",
             "content": user_input,
         })
+
+        # ---- Sliding window: truncate to last N messages ----
+        if len(self.conversation_history) > MAX_HISTORY_MESSAGES:
+            self.conversation_history = self.conversation_history[-MAX_HISTORY_MESSAGES:]
 
         print(f"{Fore.MAGENTA}  [Agent is thinking...]{Style.RESET_ALL}")
 
@@ -528,13 +549,13 @@ class SREAgent:
 
 
 # ==============================================================
-#  Smoke Test
+#  Smoke Test (updated for dict assertions)
 # ==============================================================
 
 def run_smoke_test():
-    """Quick verification that all tools work with the loaded logs."""
+    """Quick verification that all tools return dicts with the loaded logs."""
     print(f"\n{Fore.CYAN}{'=' * 60}")
-    print("SMOKE TEST -- Verifying Phase 2 Tool Modules")
+    print("SMOKE TEST -- Verifying Phase 2 Tool Modules (dict outputs)")
     print(f"{'=' * 60}{Style.RESET_ALL}\n")
 
     store = get_store()
@@ -542,21 +563,24 @@ def run_smoke_test():
     failed = 0
 
     tests = [
-        ("detect_slow_requests",       lambda: detect_slow_requests(store, time_window="48h")),
+        ("detect_slow_requests",         lambda: detect_slow_requests(store, time_window="48h")),
         ("detect_slow_requests(payment)", lambda: detect_slow_requests(store, service="payment_api", threshold_ms=500, time_window="48h")),
-        ("diagnose_latency_sources",   lambda: diagnose_latency_sources(store, time_window="24h", baseline_window="48h")),
-        ("analyze_error_patterns",     lambda: analyze_error_patterns(store, time_window="48h")),
-        ("analyze_error_patterns(err)", lambda: analyze_error_patterns(store, group_by="error_type", time_window="48h")),
-        ("check_resource_usage",       lambda: check_resource_usage(store, time_window="48h")),
-        ("check_resource_usage(pay)",  lambda: check_resource_usage(store, service="payment_api", time_window="48h")),
-        ("check_resource_usage(notif)", lambda: check_resource_usage(store, service="notification_service", time_window="48h")),
+        ("diagnose_latency_sources",     lambda: diagnose_latency_sources(store, time_window="24h", baseline_window="48h")),
+        ("analyze_error_patterns",       lambda: analyze_error_patterns(store, time_window="48h")),
+        ("analyze_error_patterns(err)",  lambda: analyze_error_patterns(store, group_by="error_type", time_window="48h")),
+        ("check_resource_usage",         lambda: check_resource_usage(store, time_window="48h")),
+        ("check_resource_usage(pay)",    lambda: check_resource_usage(store, service="payment_api", time_window="48h")),
+        ("check_resource_usage(notif)",  lambda: check_resource_usage(store, service="notification_service", time_window="48h")),
     ]
 
     for name, fn in tests:
         try:
             result = fn()
-            assert isinstance(result, str) and len(result) > 50, "Result too short"
-            print(f"  {Fore.GREEN}PASS{Style.RESET_ALL}: {name} ({len(result)} chars)")
+            assert isinstance(result, dict), f"Expected dict, got {type(result).__name__}"
+            # Verify it's JSON-serializable
+            json_str = json.dumps(result, default=str)
+            assert len(json_str) > 50, "Result JSON too short"
+            print(f"  {Fore.GREEN}PASS{Style.RESET_ALL}: {name} ({len(json_str)} chars JSON)")
             passed += 1
         except Exception as exc:
             print(f"  {Fore.RED}FAIL{Style.RESET_ALL}: {name} -- {exc}")
@@ -583,11 +607,11 @@ BANNER = f"""
 """
 
 SAMPLE_QUERIES = [
-    "The system feels slow",
-    "Are there any errors in the payment API?",
-    "Show me the resource health across all services",
-    "Find slow requests then diagnose where the latency is coming from",
-    "Is performance getting worse compared to baseline?",
+    "Check payment_api for slow requests",
+    "Are there any errors in the notification service?",
+    "Show me the resource health for charging_controller",
+    "Find slow requests in payment_api then diagnose where the latency is coming from",
+    "Is payment_api performance getting worse compared to baseline?",
 ]
 
 
