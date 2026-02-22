@@ -116,11 +116,15 @@ class LogEntry(BaseModel):
             return max(0.0, total - db - ext - app)
         return None
 
-    # -- Helpers: error classification -------------------
     @property
     def is_fast_failure(self) -> bool:
-        """status >= 400 AND response_time < 100ms -> likely LB reject."""
-        if self.status_code is not None and self.status_code >= 400:
+        """Client error (4xx) with rt < 100ms -> likely LB reject.
+
+        5xx errors are NOT fast failures, even if fast -- they are
+        server crashes that must remain in latency stats.
+        """
+        if (self.status_code is not None
+                and 400 <= self.status_code < 500):
             rt = self.effective_response_time_ms
             if rt is not None and rt < 100:
                 return True
@@ -167,73 +171,6 @@ class LogEntry(BaseModel):
         """endpoint (payment_api) -> event_type (fallback)."""
         return self.endpoint or self.event_type
 
-
-# ======================================================
-#  Analysis Result Models
-# ======================================================
-
-class SlowRequest(BaseModel):
-    timestamp: datetime
-    service: str
-    endpoint_or_event: str
-    response_time_ms: float
-    threshold_ms: float
-    db_query_time_ms: Optional[float] = None
-    external_api_time_ms: Optional[float] = None
-    app_logic_time_ms: Optional[float] = None
-    unaccounted_ms: Optional[float] = None
-    user_id: Optional[str] = None
-
-
-class EndpointLatencyProfile(BaseModel):
-    group_key: str
-    request_count: int
-    median_ms: float
-    p90_ms: float
-    max_ms: float
-    slow_count: int
-    baseline_median_ms: Optional[float] = None
-    severity: str = "NORMAL"
-
-
-class LatencyBreakdown(BaseModel):
-    group_key: str
-    total_median_ms: float
-    db_median_ms: Optional[float] = None
-    external_median_ms: Optional[float] = None
-    app_logic_median_ms: Optional[float] = None
-    unaccounted_median_ms: Optional[float] = None
-    primary_bottleneck: str = "unknown"
-    bottleneck_pct: float = 0.0
-
-
-class ErrorBucket(BaseModel):
-    group_key: str
-    total_errors: int
-    client_errors: int = 0
-    server_errors: int = 0
-    error_types: Dict[str, int] = Field(default_factory=dict)
-    retry_total: int = 0
-    failure_rate_pct: float = 0.0
-    affected_users: int = 0
-
-
-class ResourceHealthIndicator(BaseModel):
-    service: str
-    indicator_name: str
-    current_value: float
-    baseline_value: Optional[float] = None
-    severity: str = "NORMAL"
-    detail: str = ""
-
-
-class WarnStressSignal(BaseModel):
-    service: str
-    event_type: str
-    count: int
-    avg_retry_count: float = 0.0
-    max_retry_count: int = 0
-    sample_errors: List[str] = Field(default_factory=list)
 
 
 # ======================================================

@@ -264,7 +264,21 @@ def diagnose_latency_sources(
                 "bottleneck_pct": bottleneck_pct,
             })
 
-    return {
+    # ---- Coverage Warning: detect breakdown data gaps ----
+    total_current = sum(len(v) for v in current_groups.values())
+    total_with_breakdown = sum(
+        1 for e in current
+        if e.db_query_time_ms is not None
+    )
+    coverage_pct = round(total_with_breakdown / total_current * 100, 1) if total_current else 100.0
+    coverage_warning = None
+    if coverage_pct < 90.0:
+        skipped_pct = round(100.0 - coverage_pct, 1)
+        coverage_warning = (
+            f"Breakdown excludes {skipped_pct}% of requests (missing timing data)"
+        )
+
+    result = {
         "data_context": store.get_data_context(),
         "service": service or "all_services",
         "endpoint": endpoint or "all_endpoints",
@@ -284,3 +298,6 @@ def diagnose_latency_sources(
         "profiles": profiles,
         "breakdowns": breakdowns,
     }
+    if coverage_warning:
+        result["coverage_warning"] = coverage_warning
+    return result

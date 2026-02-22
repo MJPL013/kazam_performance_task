@@ -17,6 +17,21 @@ from utils.log_parser import LogEntry, LogStore
 
 
 # ==================================================
+#  Helpers
+# ==================================================
+
+def _is_request_event(e: LogEntry) -> bool:
+    """True if this entry represents an actual request (not a pure info/lifecycle log)."""
+    return (
+        e.method is not None
+        or e.response_time_ms is not None
+        or e.metadata.get("processing_time_ms") is not None
+        or e.metadata.get("response_time_ms") is not None
+        or (e.status_code is not None)
+    )
+
+
+# ==================================================
 #  TOOL 3 -- analyze_error_patterns
 # ==================================================
 
@@ -133,6 +148,9 @@ def analyze_error_patterns(
     # Sort stress signals by count descending
     stress_signals.sort(key=lambda x: x["count"], reverse=True)
 
+    # Request-only count for accurate failure rate denominator
+    request_count = sum(1 for e in pool if _is_request_event(e))
+
     return {
         "data_context": store.get_data_context(),
         "service": service or "all_services",
@@ -140,8 +158,9 @@ def analyze_error_patterns(
         "group_by": group_by,
         "reference_time": store.reference_time.isoformat(),
         "total_entries_in_window": total_count,
+        "request_entries": request_count,
         "error_warn_entries": len(error_entries),
-        "error_rate_pct": round(len(error_entries) / total_count * 100, 2) if total_count else 0.0,
+        "error_rate_pct": round(len(error_entries) / request_count * 100, 2) if request_count else 0.0,
         "buckets": buckets,
         "stress_signals": stress_signals,
     }

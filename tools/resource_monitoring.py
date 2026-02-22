@@ -63,8 +63,12 @@ def check_resource_usage(
             "detail": f"{len(strict_errors)}/{svc_total} entries (ERROR/5xx only)",
         })
 
-        # -- Separate Warn/Throttle Rate --
-        warns = [e for e in entries if e.level == "WARN"]
+        # -- Separate Warn/Throttle Rate (exclude overlap with strict_errors) --
+        strict_error_ids = set(id(e) for e in strict_errors)
+        warns = [
+            e for e in entries
+            if e.level == "WARN" and id(e) not in strict_error_ids
+        ]
         warn_rate = len(warns) / svc_total * 100 if svc_total else 0.0
         indicators.append({
             "service": svc,
@@ -73,7 +77,7 @@ def check_resource_usage(
             "severity": ("HIGH" if warn_rate > 20
                          else "MEDIUM" if warn_rate > 10
                          else "NORMAL"),
-            "detail": f"{len(warns)}/{svc_total} entries (WARN only)",
+            "detail": f"{len(warns)}/{svc_total} entries (WARN only, excluding 5xx)",
         })
 
         # ---- Service-specific indicators ----
@@ -179,6 +183,24 @@ def _charging_controller_indicators(
         "current_value": float(len(hw_err)),
         "severity": "CRITICAL" if len(hw_err) > 10 else "HIGH" if len(hw_err) > 5 else "NORMAL",
         "detail": f"hardware_communication_error events: {len(hw_err)}",
+    })
+
+    # Abnormal State Transitions (to_state = "error" or "fault")
+    abnormal_transitions = [
+        e for e in entries
+        if e.event_type == "state_transition"
+        and e.metadata.get("to_state") in ("error", "fault")
+    ]
+    indicators.append({
+        "service": svc,
+        "indicator_name": "Abnormal State Transitions",
+        "current_value": float(len(abnormal_transitions)),
+        "severity": (
+            "CRITICAL" if len(abnormal_transitions) > 10
+            else "HIGH" if len(abnormal_transitions) > 3
+            else "NORMAL"
+        ),
+        "detail": f"state_transition to error/fault: {len(abnormal_transitions)}",
     })
 
     # Session completion rate
