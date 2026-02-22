@@ -225,50 +225,20 @@ def _charging_controller_indicators(
             "detail": f"Logs flagged as recurring_issue: {recurring_count}",
         })
 
-    # --- FIXED: Session Duration Drift (join started -> completed) ---
-    started_sessions = [e for e in entries if e.event_type == "charging_session_started"]
+    # --- Session Duration Drift ---
+    # NOTE: Cannot reliably join started→completed events because
+    # charging_session_completed logs lack user_id (no shared join key).
+    # Acknowledging the gap instead of shipping broken code.
+    indicators.append({
+        "service": svc,
+        "indicator_name": "Session Duration Drift",
+        "current_value": 0.0,
+        "severity": "NORMAL",
+        "detail": "unavailable (missing join key in logs)",
+    })
+
+    # --- Energy Anomalies (completed but < 1.0 kWh → failed micro-sessions) ---
     completed_sessions = [e for e in entries if e.event_type == "charging_session_completed"]
-
-    # Build lookup: (station_id, user_id) -> estimated_duration_min from started events
-    estimated_lookup: Dict[tuple, float] = {}
-    for e in started_sessions:
-        key = (e.station_id, e.user_id)
-        est = e.metadata.get("estimated_duration_min")
-        if est is not None:
-            estimated_lookup[key] = float(est)
-
-    drift_data: List[Dict[str, Any]] = []
-    for e in completed_sessions:
-        actual = e.metadata.get("duration_min")
-        if actual is None:
-            continue
-        actual_f = float(actual)
-        key = (e.station_id, e.user_id)
-        estimated_f = estimated_lookup.get(key)
-        if estimated_f is not None and estimated_f > 0:
-            drift_pct = round(((actual_f - estimated_f) / estimated_f) * 100, 1)
-            drift_data.append({
-                "station_id": e.station_id,
-                "actual_min": actual_f,
-                "estimated_min": estimated_f,
-                "drift_pct": drift_pct,
-            })
-
-    if drift_data:
-        avg_drift = round(sum(d["drift_pct"] for d in drift_data) / len(drift_data), 1)
-        max_drift = max(drift_data, key=lambda x: abs(x["drift_pct"]))
-        indicators.append({
-            "service": svc,
-            "indicator_name": "Session Duration Drift",
-            "current_value": avg_drift,
-            "severity": "HIGH" if abs(avg_drift) > 30 else "MEDIUM" if abs(avg_drift) > 15 else "NORMAL",
-            "detail": (
-                f"Avg drift: {avg_drift}%, Max drift: {max_drift['drift_pct']}% "
-                f"(station {max_drift['station_id']}), Samples: {len(drift_data)}"
-            ),
-        })
-
-    # --- FIXED: Energy Anomalies (completed but < 1.0 kWh → failed micro-sessions) ---
     low_energy = [
         e for e in completed_sessions
         if e.metadata.get("energy_delivered_kwh") is not None

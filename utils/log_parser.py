@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from utils.baseline_calculator import parse_window_to_timedelta
 
@@ -45,6 +45,19 @@ class LogEntry(BaseModel):
     event_type: str
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
+    # -- UTC enforcement at model level ------------------
+    @field_validator("timestamp", mode="before")
+    @classmethod
+    def _ensure_utc(cls, v: Any) -> datetime:
+        """Normalise every timestamp to UTC on construction."""
+        if isinstance(v, str):
+            v = datetime.fromisoformat(v)
+        if isinstance(v, datetime):
+            if v.tzinfo is None:
+                return v.replace(tzinfo=timezone.utc)
+            return v.astimezone(timezone.utc)
+        return v  # let Pydantic raise if wrong type
+
     # -- Optional root-level fields (payment_api only) --
     endpoint: Optional[str] = None
     method: Optional[str] = None
@@ -57,9 +70,17 @@ class LogEntry(BaseModel):
     # -- Helpers: response time resolution ---------------
     @property
     def effective_response_time_ms(self) -> Optional[float]:
-        """Root response_time_ms (payment) or metadata (notification)."""
+        """Resolve response time across all 3 services (priority order).
+
+        1. Root response_time_ms        (payment_api)
+        2. metadata.response_time_ms    (charging_controller)
+        3. metadata.processing_time_ms  (notification_service)
+        """
         if self.response_time_ms is not None:
             return self.response_time_ms
+        val = self.metadata.get("response_time_ms")
+        if val is not None:
+            return float(val)
         val = self.metadata.get("processing_time_ms")
         return float(val) if val is not None else None
 
@@ -275,14 +296,7 @@ class LogStore:
                     try:
                         data = json.loads(raw_line)
                         entry = LogEntry(**data)
-
-                        # --- UTC enforcement ---
-                        # If timestamp is naive, assume UTC; otherwise convert.
-                        if entry.timestamp.tzinfo is None:
-                            entry.timestamp = entry.timestamp.replace(tzinfo=timezone.utc)
-                        else:
-                            entry.timestamp = entry.timestamp.astimezone(timezone.utc)
-
+                        # UTC enforcement handled by LogEntry.@field_validator
                         self.entries.append(entry)
                     except Exception as exc:
                         self.parse_errors.append({

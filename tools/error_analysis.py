@@ -38,11 +38,14 @@ def analyze_error_patterns(
     pool = store.filter(service=service, time_window=time_window)
     total_count = len(pool)
 
-    # Errors: WARN + ERROR level entries, status >= 400, or final_status == "failed"
+    # Errors: ERROR level, status >= 400, final_status=="failed",
+    #         or WARN-with-server-error (status >= 500).
+    # Plain WARNs without 5xx are NOT errors -- they live in stress_signals.
     error_entries = [
         e for e in pool
-        if e.level in ("WARN", "ERROR")
-        or (e.status_code and e.status_code >= 400)
+        if e.level == "ERROR"
+        or (e.level == "WARN" and e.status_code is not None and e.status_code >= 500)
+        or (e.status_code is not None and e.status_code >= 400)
         or e.metadata.get("final_status") == "failed"
     ]
 
@@ -58,7 +61,12 @@ def analyze_error_patterns(
             return e.group_key
 
     # BUG FIX: Per-group total for correct denominator
-    total_per_group: Dict[str, int] = Counter(_key(e) for e in pool)
+    # When group_by="provider", only count entries that actually have a provider field.
+    if group_by == "provider":
+        provider_pool = [e for e in pool if e.metadata.get("provider")]
+        total_per_group: Dict[str, int] = Counter(_key(e) for e in provider_pool)
+    else:
+        total_per_group: Dict[str, int] = Counter(_key(e) for e in pool)
 
     # Build error buckets
     buckets_raw: Dict[str, Dict[str, Any]] = {}

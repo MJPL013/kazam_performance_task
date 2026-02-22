@@ -534,11 +534,15 @@ class SREAgent:
         })
 
         # ---- Sliding window: truncate to last N messages ----
+        # Drop oldest messages in user→assistant pairs to keep context coherent.
         if len(self.conversation_history) > MAX_HISTORY_MESSAGES:
             trimmed = self.conversation_history[-MAX_HISTORY_MESSAGES:]
-            # Ensure the first message is a user message (don't orphan assistant replies)
+            # Strip any leading non-user messages (tool results, orphaned assistant)
             while trimmed and trimmed[0]["role"] != "user":
                 trimmed.pop(0)
+            # Safety: if aggressive trimming killed everything, keep last user msg
+            if not trimmed:
+                trimmed = [self.conversation_history[-1]]
             self.conversation_history = trimmed
 
         print(f"{Fore.MAGENTA}  [Agent is thinking...]{Style.RESET_ALL}")
