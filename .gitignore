@@ -1,0 +1,9 @@
+.env
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+*.log
+smoke_out.txt
+test_zlm.py
