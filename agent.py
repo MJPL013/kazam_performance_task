@@ -51,6 +51,7 @@ from utils.log_parser import LogStore
 from tools.latency_analysis import detect_slow_requests, diagnose_latency_sources
 from tools.error_analysis import analyze_error_patterns
 from tools.resource_monitoring import check_resource_usage
+from tools.visualization import generate_latency_chart, generate_error_heatmap
 
 
 # ==============================================================
@@ -77,6 +78,7 @@ def get_store() -> LogStore:
             f"parse errors: {len(_store.parse_errors)}, "
             f"reference_time: {_store.reference_time.isoformat()}{Style.RESET_ALL}"
         )
+        print(f"{Fore.CYAN}[System] Charts directory: {BASE_DIR / 'charts'}{Style.RESET_ALL}")
     return _store
 
 
@@ -114,6 +116,19 @@ def tool_check_resource_usage(
     return check_resource_usage(get_store(), service=service, time_window=time_window)
 
 
+def tool_generate_latency_chart(
+    service: Optional[str] = None,
+    time_window: str = "24h",
+) -> dict:
+    return generate_latency_chart(get_store(), service=service, time_window=time_window)
+
+
+def tool_generate_error_heatmap(
+    time_window: str = "48h",
+) -> dict:
+    return generate_error_heatmap(get_store(), time_window=time_window)
+
+
 # ── Registry: name -> (function, JSON schema) ──
 
 TOOL_FUNCTIONS: Dict[str, Callable] = {
@@ -121,6 +136,8 @@ TOOL_FUNCTIONS: Dict[str, Callable] = {
     "diagnose_latency_sources": tool_diagnose_latency_sources,
     "analyze_error_patterns": tool_analyze_error_patterns,
     "check_resource_usage": tool_check_resource_usage,
+    "generate_latency_chart": tool_generate_latency_chart,
+    "generate_error_heatmap": tool_generate_error_heatmap,
 }
 
 TOOL_SCHEMAS = [
@@ -230,6 +247,47 @@ TOOL_SCHEMAS = [
                         "type": "string",
                         "default": "1h",
                         "description": "How far back to look. Examples: '1h', '6h', '24h'.",
+                    },
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "generate_latency_chart",
+            "description": "Generate a scatter plot of response_time_ms over time with a rolling median trend line and spike window overlays. Call when the user says 'show', 'plot', 'chart', 'graph', 'visualize', 'trend', 'over time', or 'timeline'. Returns the filepath of the saved PNG.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "service": {
+                        "type": "string",
+                        "enum": ["payment_api", "charging_controller", "notification_service"],
+                        "description": "Filter by service. Omit or null for all services (color-coded by service).",
+                    },
+                    "time_window": {
+                        "type": "string",
+                        "default": "24h",
+                        "description": "How far back to look. Examples: '6h', '24h', '48h'.",
+                    },
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "generate_error_heatmap",
+            "description": "Generate a heatmap of error counts per hour × service. Call when the user says 'heatmap', 'error distribution', 'when did errors', 'error pattern over time', or 'which hour'. Returns the filepath of the saved PNG.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "time_window": {
+                        "type": "string",
+                        "default": "48h",
+                        "description": "Width of the heatmap window. Examples: '24h', '48h'. Each row = 1 hour.",
                     },
                 },
                 "required": [],

@@ -10,3 +10,8 @@ test_zlm.py
 # Demo content
 demo/*
 !demo/example_queries.txt
+
+# Chart outputs
+charts/*.png
+charts/*.html
+

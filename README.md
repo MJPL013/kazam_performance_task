@@ -345,7 +345,7 @@ Refactored the Phase 1 engine for Phase 2 integration:
 ### Phase 2 — Agent Wrapper & Multi-LLM Evaluation (3 hours)
 Wrapped the engine in a ReAct orchestrator. Wrote provider adapters for Gemini and OpenAI-compatible APIs. Evaluated agent output quality across three models (Gemini 2.0 Flash, DeepSeek Chat, GPT-4o). All three models correctly triggered multi-tool chains when asked root-cause questions. Key observation: models differed mainly in how they formatted markdown tables and whether they proactively flagged `data_context.is_historical` warnings. Refined the system prompt based on this evaluation — added explicit formatting rules and the `AMBIGUITY FALLBACK` rule after observing that two of three models would loop on vague service queries.
 
-### Documentation (1 hour)
+### Documentation
 This README.
 
 ---
