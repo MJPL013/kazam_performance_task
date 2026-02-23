@@ -657,6 +657,8 @@ def run_smoke_test():
         ("check_resource_usage",         lambda: check_resource_usage(store, time_window="48h")),
         ("check_resource_usage(pay)",    lambda: check_resource_usage(store, service="payment_api", time_window="48h")),
         ("check_resource_usage(notif)",  lambda: check_resource_usage(store, service="notification_service", time_window="48h")),
+        ("generate_latency_chart",       lambda: generate_latency_chart(store, service="payment_api", time_window="24h")),
+        ("generate_error_heatmap",       lambda: generate_error_heatmap(store, time_window="48h")),
     ]
 
     for name, fn in tests:

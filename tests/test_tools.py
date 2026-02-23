@@ -11,6 +11,7 @@ from utils.log_parser import LogStore
 from tools.latency_analysis import detect_slow_requests, diagnose_latency_sources
 from tools.error_analysis import analyze_error_patterns
 from tools.resource_monitoring import check_resource_usage
+from tools.visualization import generate_latency_chart, generate_error_heatmap
 
 class TestPerformanceTools(unittest.TestCase):
     @classmethod
@@ -155,6 +156,8 @@ class TestPerformanceTools(unittest.TestCase):
             lambda: diagnose_latency_sources(self.store, time_window="24h", baseline_window="48h"),
             lambda: analyze_error_patterns(self.store, time_window="48h"),
             lambda: check_resource_usage(self.store, time_window="48h"),
+            lambda: generate_latency_chart(self.store, time_window="48h"),
+            lambda: generate_error_heatmap(self.store, time_window="48h"),
         ]
         for tool_fn in tools:
             result = tool_fn()
@@ -163,6 +166,20 @@ class TestPerformanceTools(unittest.TestCase):
             self.assertIn('log_data_ends_at', ctx)
             self.assertIn('hours_since_last_log', ctx)
             self.assertIn('is_historical', ctx)
+
+    def test_generate_latency_chart_valid(self):
+        """Test latency chart generation returns a valid filepath."""
+        res = generate_latency_chart(self.store, service="payment_api", time_window="24h")
+        self.assertNotIn("error", res)
+        self.assertIn("filepath", res)
+        self.assertTrue(Path(res["filepath"]).exists())
+
+    def test_generate_error_heatmap_valid(self):
+        """Test error heatmap generation returns a valid filepath."""
+        res = generate_error_heatmap(self.store, time_window="48h")
+        self.assertNotIn("error", res)
+        self.assertIn("filepath", res)
+        self.assertTrue(Path(res["filepath"]).exists())
 
 if __name__ == '__main__':
     unittest.main()

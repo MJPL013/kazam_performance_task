@@ -64,7 +64,7 @@ python agent.py
 
 ```bash
 python agent.py --smoke
-# Expected: SMOKE TEST RESULTS: 8/8 passed
+# Expected: SMOKE TEST RESULTS: 10/10 passed
 ```
 
 ---
@@ -108,6 +108,11 @@ Arrow keys supported for history navigation. Type `exit` or `quit` to stop.
 "Find slow requests in payment_api then diagnose where the latency is coming from"
 "Is payment_api performance getting worse compared to the baseline?"
 "Check if STATION_042 has hardware errors"
+
+# Visualization (Bonus 4)
+"Show me a plot of the latency for payment_api over the last 24 hours"
+"Give me an error heatmap for all services over 48 hours"
+"Visualize the response time trend for the charging_controller"
 ```
 
 See `demo/example_queries.txt` for the full list.
@@ -139,7 +144,10 @@ Phase2/
 │   ├── __init__.py
 │   ├── latency_analysis.py     # detect_slow_requests, diagnose_latency_sources
 │   ├── error_analysis.py       # analyze_error_patterns
-│   └── resource_monitoring.py  # check_resource_usage
+│   ├── resource_monitoring.py  # check_resource_usage
+│   └── visualization.py        # generate_latency_chart, generate_error_heatmap
+│
+├── charts/                    # Locally generated PNG/HTML plots (.gitignored)
 │
 ├── utils/
 │   ├── __init__.py
@@ -211,6 +219,12 @@ Counts errors grouped by endpoint, error_type, or provider (for notification_ser
 
 **`check_resource_usage(store, service, time_window)`**
 Because these are application logs without OS-level telemetry, resource health is inferred from log-signal proxies. For `payment_api`: strict error rate (ERROR/5xx only), warn/throttle rate, DB connection pool exhaustion events (distinct from normal slow queries), and external API gateway timeouts. For `charging_controller`: hardware communication errors per station, abnormal state transitions, session completion ratio. For `notification_service`: queue depth (highest observed backlog in window), retry exhaustion count, and delivery failure rate split by provider (twilio vs. sendgrid). Each indicator is labelled NORMAL / MEDIUM / HIGH / CRITICAL.
+
+**`generate_latency_chart(store, service, time_window)`**
+Generates a scatter plot of `response_time_ms` over time. Includes a 30-point rolling median trend line and red vertical bands for spike windows (reusing data from `detect_slow_requests`). Automatically applies log-scaling to the Y-axis if the data range exceeds 10× the median to handle outliers without flattening the visualization. Outputs a high-DPI PNG to the `charts/` directory.
+
+**`generate_error_heatmap(store, time_window)`**
+Creates a 2D intensity map showing error counts per hour across all three services. Uses `seaborn` for rich heatmapping (with a `matplotlib` fallback) to identify temporal error clusters. Helps SREs identify precisely when an incident began and which services were proportionally affected.
 
 ### Agent Orchestration
 
@@ -390,6 +404,8 @@ google-genai>=1.0      # Gemini provider
 openai>=1.0            # OpenAI-compatible provider
 python-dotenv>=1.0     # .env loading
 colorama>=0.4          # Terminal colour output
+matplotlib>=3.7        # Latency timeseries plotting
+seaborn>=0.12          # Error heatmap visualization
 ```
 
 No APM platform SDKs. No LangChain. No vector databases.
@@ -399,9 +415,9 @@ No APM platform SDKs. No LangChain. No vector databases.
 ## Running Tests
 
 ```bash
-# Unit tests (18 tests — tool contracts + agent orchestration)
+# Unit tests (20 tests — tool contracts + agent orchestration)
 python -m unittest tests.test_tools tests.test_agent -v
 
-# Smoke tests (8 tests — all 4 tools against real log files)
+# Smoke tests (10 tests — all 6 tools against real log files)
 python agent.py --smoke
 ```
