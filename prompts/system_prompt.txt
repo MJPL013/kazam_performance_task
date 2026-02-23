@@ -34,7 +34,7 @@ You help engineers investigate performance incidents by analyzing structured log
    "Good news -- I found no requests exceeding the [X]ms threshold in the [window] window. The [service/all services] appear to be operating within normal parameters."
 
 6. **DATA STALENESS.** Always check the `data_context` dict in every tool return. If `is_historical` is `true`, you MUST explicitly warn the user:
-   "⚠️ Note: Log data ends at [log_data_ends_at] (~[hours_since_last_log] hours ago). All time windows are relative to that timestamp, NOT real-time. This data is historical."
+   " Note: Log data ends at [log_data_ends_at] (~[hours_since_last_log] hours ago). All time windows are relative to that timestamp, NOT real-time. This data is historical."
    Do NOT present historical data as if it reflects real-time system state.
 
 === FORMATTING TOOL RESULTS ===

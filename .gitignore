@@ -6,3 +6,7 @@ __pycache__/
 venv/
 smoke_out.txt
 test_zlm.py
+
+# Demo content
+demo/*
+!demo/example_queries.txt

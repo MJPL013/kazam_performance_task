@@ -1,0 +1,26 @@
+Basic Performance Inquiries:
+- "Check payment_api for slow requests"
+- "Show me API endpoints slower than 1 second in the last hour"
+- "Are there any slow requests in the charging controller?"
+
+Error & Failure Analysis:
+- "Are there any errors in the notification service?"
+- "What's causing the spike in 5xx errors?"
+- "Which endpoint has the highest failure rate right now?"
+- "Show me error patterns for charging_controller grouped by event_type"
+
+Resource & Health Monitoring:
+- "Show me the resource health for charging_controller"
+- "Is the payment service having memory issues or connection pool exhaustion?"
+- "Check the notification service queue status"
+
+Deep-Dive & Root Cause:
+- "Find slow requests in payment_api then diagnose where the latency is coming from"
+- "Why is /api/v1/payments/process slow right now?"
+- "Is payment_api performance getting worse compared to baseline?"
+- "Compare payment_api response times: this hour vs. last hour"
+
+Hardware/Station Specifics:
+- "Check if Station_042 has hardware errors"
+- "Are there any energy anomalies in the charging controller logs?"
+- "Which charging stations are experiencing the most timeouts?"
